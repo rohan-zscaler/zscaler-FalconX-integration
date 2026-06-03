@@ -52,14 +52,14 @@ class IntelBridge():
 
     def prepare(self, token, indicators):
         """Handles transforming indicators object into a Zscaler API ready model
-        token - Falcon API Auth token
+        token - Zscaler API Auth token
         indicators - List containing indicators pulled from Falcon API
-        returns: Indicator list formatted for Zscaler API ingestion
+        returns: (ingestable indicators, amount rejected, current Zscaler token)
         """
         prepared, amount_rejected_crwd = prepare_indicators(indicators)
-        ingestable, amount_rejected_zs = look_up_indicators(prepared, token)
+        ingestable, amount_rejected_zs, token = look_up_indicators(prepared, token)
         amount_rejected = amount_rejected_zs + amount_rejected_crwd
-        return ingestable, amount_rejected
+        return ingestable, amount_rejected, token
     
     def update(self, token, content, category, ingestable, deleted):
         """Handles updating the URL Category content
@@ -76,10 +76,10 @@ class IntelBridge():
                         [!!!] You are still protected during this phase;
                         indicator refresh won't take effect until new indicators are pushed
                         and changes are activated!""")
-            push_indicators(token, category, content, True)
+            _, token = push_indicators(token, category, content, True)
         # push new content
         logging.info(f"[Zscaler API] Pushing new indicators")
-        push_indicators(token, category, ingestable, False)
+        _, token = push_indicators(token, category, ingestable, False)
         # activate
         save_changes(token)
         return
@@ -102,7 +102,7 @@ class IntelBridge():
         content = category['content']
         start = int(time.time())
         indicators = self.pull(falcon, deleted)
-        ingestable, amount_rejected = self.prepare(zs_token, indicators)
+        ingestable, amount_rejected, zs_token = self.prepare(zs_token, indicators)
         # write_data(ingestable, deleted)
         self.update(zs_token, content, category_name, ingestable, deleted)
         end = int(time.time())

@@ -21,6 +21,26 @@ zs_url_category = "CrowdStrike"
 log_config = config['LOG']
 data_log = int(log_config['log_indicators'])
 
+# Zscaler expires JSESSIONID after 5 minutes. Refresh at 4 to leave a safety margin
+# for in-flight requests and clock skew. Authentication is cheap: /authenticatedSession
+# POST is rate-limited to 2/sec and 1000/hr, so a multi-hour run can comfortably
+# re-auth dozens of times.
+ZS_SESSION_TTL = 240
+
+def _refresh_if_stale(token, headers, last_auth):
+    """Proactively re-auths when the JSESSIONID is approaching expiry.
+    token - current Zscaler JSESSIONID
+    headers - request headers dict; cookie is mutated in place
+    last_auth - epoch seconds when token was last issued
+    returns: (token, last_auth) - refreshed if stale, unchanged otherwise
+    """
+    if time.time() - last_auth > ZS_SESSION_TTL:
+        logging.info("[Zscaler API] Proactive JSESSIONID refresh (TTL threshold reached)")
+        token = zs_auth()
+        headers["cookie"] = "JSESSIONID=" + str(token)
+        last_auth = time.time()
+    return token, last_auth
+
 def refresh_token():
     """Refreshes Zscaler API Auth token
     returns: Zscaler API Auth token
@@ -139,6 +159,7 @@ def look_up_indicators(indicators, token):
     headers = {'content-type': "application/json",
                'cache-control': "no-cache",
                'cookie': "JSESSIONID=" + str(token)}
+    last_auth = time.time()
     chunks = split_indicators(indicators)
     amount_rejected = 0
     print(f"{'='*20}Zscaler API URL Lookup{'='*20}")
@@ -146,6 +167,7 @@ def look_up_indicators(indicators, token):
     for chunk in chunks:
         success  = False
         while not success:
+            token, last_auth = _refresh_if_stale(token, headers, last_auth)
             response = requests.post(url=url, headers=headers, data=json.dumps(chunk))
             if response.status_code == 429:
                 r = int(response.headers._store['retry-after'][1])
@@ -160,11 +182,13 @@ def look_up_indicators(indicators, token):
                 logging.info(f"[Zscaler API] 401 Token Expired: Renewing auth and retrying.")
                 token = zs_auth()
                 headers["cookie"] = "JSESSIONID=" + str(token)
+                last_auth = time.time()
                 continue
             if response.status_code == 412:
                 logging.info(f"[Zscaler API] 412 Unknown error: Renewing auth and retrying.")
                 token = zs_auth()
                 headers["cookie"] = "JSESSIONID=" + str(token)
+                last_auth = time.time()
                 continue
             if response.status_code == 400:
                 logging.info(f"[Zscaler API] 400 Bad Request: One or more indicators in this chunk are incompatible with the URL look-up API. Skipping this chunk.")
@@ -189,7 +213,7 @@ def look_up_indicators(indicators, token):
             progress = increment(progress, len(chunk))
             time.sleep(60)
     print(f"{'='*29}DONE{'='*29}")
-    return ingestable, amount_rejected
+    return ingestable, amount_rejected, token
 
 def push_indicators(token, category, indicators, deleted):
     """Pushes new indicators to the Zscaler API
@@ -209,20 +233,22 @@ def push_indicators(token, category, indicators, deleted):
     print(f"{'='*22 if deleted else '='*22}"
           f"{'Removing Old' if deleted else 'Posting New'}* URL's"
           f"{'='*21 if deleted else '='*22}")
-    results = put_chunks(indicators, url, headers, progress)
+    results, token = put_chunks(indicators, url, headers, progress, token)
     print(f"{'='*29}DONE{'='*29}")
     if data_log == 1:
         write_data(indicators, deleted)
-    return results
+    return results, token
 
-def put_chunks(indicators, url, headers, progress):
+def put_chunks(indicators, url, headers, progress, token):
     """Helper function for push_indicators that makes requests and tracks progress
     indicators - list of indicators
     url - Zscaler API URL
     headers - headers for HTTP request
     progress - progress object
-    returns: results of push
+    token - Zscaler API Auth token (refreshed in-place on TTL or 401)
+    returns: (results of push, current token)
     """
+    last_auth = time.time()
     results = []
     indicators = indicators['urls']
     partitions = math.ceil(len(indicators)/5000)
@@ -235,6 +261,7 @@ def put_chunks(indicators, url, headers, progress):
         #         progress[1] = progress[1] + 1
         #         continue
         while not success:
+            token, last_auth = _refresh_if_stale(token, headers, last_auth)
             payload = {"customCategory": "true",
                     "superCategory": "USER_DEFINED",
                     "urls": chunk,
@@ -255,6 +282,7 @@ def put_chunks(indicators, url, headers, progress):
                 logging.info(f"[Zscaler API] 401 Token Expired: Renewing auth and retrying.")
                 token = zs_auth()
                 headers["cookie"] = "JSESSIONID=" + str(token)
+                last_auth = time.time()
                 continue
             try:
                 response.raise_for_status()
@@ -271,14 +299,18 @@ def put_chunks(indicators, url, headers, progress):
             result = response.json()
             time.sleep(1)
     results.append(result)
-    return results
+    return results, token
 
 def save_changes(token):
     """Posts to Zscaler API to activate changes made in current etl_loop
-    token - Zscaler API Auth token
+    token - Zscaler API Auth token (may be stale after a long push)
     returns: HTTP results
     """
     logging.info(f"[Zscaler API] Activating changes")
+    # The preceding push phase can run for hours on large indicator sets. Re-auth
+    # here so the GET /status, POST /status/activate, and DELETE /authenticatedSession
+    # sequence always runs within a fresh 5-minute session window.
+    token = zs_auth()
     status_url = f"{zs_hostname}/api/v1/status"
     save_url = f"{zs_hostname}/api/v1/status/activate"
     headers = {'content-type': "application/json",
