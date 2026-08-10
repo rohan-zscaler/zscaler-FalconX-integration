@@ -57,30 +57,39 @@ def get_indicators(falcon, deleted):
 
 def filter(prepared, rejected, i):
     """Helper function for prepare_indicators,
-    filters out or transforms malformed indicators that cant be indgested to Zscaler API
+    filters out or transforms malformed indicators that cant be ingested to Zscaler API
     prepared - list to append prepared indicators to
     i - indicator index
-    returns: a lsit of formatted URLs ready for Zscaler API ingestion
+    returns: a list of formatted URLs ready for Zscaler API ingestion
     """
     # prefix_regex - regex for removing URL type prefixes
     # http_regex - regex for removing protocol prefix from URL
-    # final_regex - regex that confirms Zscaler API can handle the URL string
-    # a_file - boolean that says weather or not this URL is a file
+    # final_regex - regex that confirms Zscaler API can handle the URL string.
+    #   Path/query is restricted to URL-safe characters (no whitespace, angle
+    #   brackets, or quotes). The previous permissive `.+` let raw HTML through
+    #   into the Zscaler PUT, which 400s with "URLs must not contain HTML content"
+    #   and killed the run.
+    # a_file - boolean that says whether or not this URL is a file
     file_regex = r"^url_file:"
     prefix_regex = r'^.*?_'
     http_regex = r"(?<=//).*"
-    final_regex = r"(?!.*[-_.]$)^(https?:\/\/)*[a-z0-9-]+(\.[a-z0-9-]+)+([\/\?].+|[\/])?$"
+    final_regex = r"(?!.*[-_.]$)^(https?:\/\/)*[a-z0-9-]+(\.[a-z0-9-]+)+([\/\?][^\s<>\"']*)?$"
     a_file = bool(re.search(file_regex, i))
     if not a_file:
         # removes prefix by trimming the first '_' and preceding chars
         i = re.sub(prefix_regex, '', i)
         has_http_prefix = re.search(http_regex, i)
-        if has_http_prefix: i = has_http_prefix.group() 
+        if has_http_prefix: i = has_http_prefix.group()
         # remove the port suffix
         i = i.split(":", 1)[0]
-        # validate ascii encoding just in case
-        encoded = i.encode('ascii', 'ignore')
-        i = encoded.decode()
+        # Reject non-ASCII (IDN) instead of silently stripping. Silently mutating
+        # exämple.com -> exmple.com would push a URL to the tenant that no longer
+        # matches the actual malicious host, silently defeating the block.
+        try:
+            i.encode('ascii')
+        except UnicodeEncodeError:
+            rejected.append(i)
+            return prepared, rejected
         # confirm Indicator matches zscaler's required format
         is_prepared = re.search(final_regex, i, re.IGNORECASE)
         # confirm Indicator is not a RFC1918 local IP

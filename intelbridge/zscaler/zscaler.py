@@ -299,6 +299,19 @@ def put_chunks(indicators, url, headers, progress, token):
                 headers["cookie"] = "JSESSIONID=" + str(token)
                 last_auth = time.time()
                 continue
+            if response.status_code == 400:
+                # A single malformed URL in the chunk 400s the whole PUT (e.g.
+                # "URLs must not contain HTML content"). Skip the chunk with the
+                # response and offending URLs logged so the customer can
+                # investigate, instead of raising out of put_chunks and killing
+                # the rest of the run.
+                logging.error(
+                    f"[Zscaler API] 400 Bad Request on chunk of {len(chunk)} URLs; "
+                    f"skipping this chunk. Response: {response.text[:500]}"
+                )
+                write_rejected(f"Zscaler PUT 400: {response.text[:200]}", chunk)
+                progress = increment(progress, len(chunk))
+                break
             try:
                 response.raise_for_status()
             except requests.exceptions.HTTPError as err:
