@@ -325,8 +325,8 @@ def put_chunks(indicators, url, headers, progress, token):
             success = True
             progress = increment(progress, len(chunk))
             result = response.json()
+            results.append(result)
             time.sleep(1)
-    results.append(result)
     return results, token
 
 def save_changes(token):
