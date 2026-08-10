@@ -3,6 +3,7 @@ indicators.py
 Includes methods for pulling and formatting Falcon Indicators
 """
 import configparser
+import ipaddress
 import requests
 import logging
 import re
@@ -20,6 +21,28 @@ cs_base_url = str(cs_config['base_url'])
 cs_indicator_type = str(cs_config['type']) if 'type' in cs_config else 'url'
 limit = int(cs_config['limit']) if int(cs_config['limit']) <= 275000 else 275000
 dir = os.path.dirname(os.path.realpath(__file__))
+
+# RFC 1918 private IPv4 networks. Used to skip indicators that resolve to
+# non-routable addresses — pushing them into a Zscaler URL Category would be
+# meaningless. The prior string-prefix check ("10.", "172.", "192.") was
+# over-broad: 172.16.0.0/12 doesn't fall on a clean prefix boundary, so it
+# also matched 172.5.x.x, 172.32.x.x, all of 192.x, and even hostnames like
+# "10.example.com".
+PRIVATE_IPV4_NETWORKS = (
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+)
+
+
+def _is_rfc_1918(url_or_host):
+    """True iff the URL's host component parses as an RFC 1918 private IPv4."""
+    host = url_or_host.split('/', 1)[0]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # not an IP; hostnames are never RFC 1918
+    return any(ip in net for net in PRIVATE_IPV4_NETWORKS)
 
 
 def refresh_token():
@@ -92,8 +115,8 @@ def filter(prepared, rejected, i):
             return prepared, rejected
         # confirm Indicator matches zscaler's required format
         is_prepared = re.search(final_regex, i, re.IGNORECASE)
-        # confirm Indicator is not a RFC1918 local IP
-        is_rfc_1918 = i[:3] == "10." or i[:4] == "172." or i[:4] == "192."
+        # confirm Indicator is not a RFC1918 local IP (real CIDR check, not prefix)
+        is_rfc_1918 = _is_rfc_1918(i)
         if is_prepared and not is_rfc_1918:
             prepared.append(i)
         else:
