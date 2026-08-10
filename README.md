@@ -1,6 +1,6 @@
 # ZIA/Falcon Integration: The Intel Bridge
 
-This tool seemlessly integrates CrowdStrike's Falcon's Threat Intelligence with zscaler's Zero Trust Exchange to provide an extra layer of security and visibility for web access. CrowdStrike's Falcon Intel module includes access to  cutting edge database of Indicators of Compromise curated by intelligence experts. 
+This tool seamlessly integrates CrowdStrike's Falcon's Threat Intelligence with zscaler's Zero Trust Exchange to provide an extra layer of security and visibility for web access. CrowdStrike's Falcon Intel module includes access to  cutting edge database of Indicators of Compromise curated by intelligence experts. 
 
 During runtime, the integration maintains a custom URL category in zscaler ZIA. Left to run indefinitely and unsupervised, it will automatically populate its URL Category with the newest Falcon Intel Indicators. This occurs in a 12 hour loop, and can be left running on a server for eternity or scheduled as a chron job.
 
@@ -30,6 +30,8 @@ pip3 install -r requirements.txt
 ## Configure
 Input your configurations in config.ini. Do not use quotes or ticks for any of these values.
 
+> **Do not commit your populated `config.ini`.** It contains Zscaler credentials and the Falcon API secret. The repository's `.gitignore` already excludes it from future commits; verify with `git status` before pushing.
+
 Most of the fields are self-explanatory, but be sure to put some thought into the LIMIT field. This field determines how many malicious URLs the Intel Bridge will maintain in your ZIA tenant. Zscaler offers different subscription tiers with varying maximum custom URLs (from 25K to 275K). Consider this, as well as your existing custom URL categories when you choose a value, as going over the limit will cause runtime errors. So for example, if you have a limit of 25K, and are already using 10K in another URL category, consider a value like 14000. That way, you won't go over the limit, and you leave yourself some wiggle room.
 
 
@@ -43,7 +45,7 @@ limit=Number of indicators to maintain (Max: 275,000 Default 10,000)
 [ZSCALER]
 hostname=Your zscaler Hostname (Hostname only requires the base URL (i.e. https://zsapi.zscalerthree.net))
 username=Your ZIA Username
-password=Your ZIA Passsword
+password=Your ZIA Password
 token=Your ZIA API token
 [CHRON]
 disable_loop=Change this value to 1 if you are running the Intel Bridge via Chron job. This will force the program to quit after running. (Default 0, looping enabled)
@@ -58,11 +60,9 @@ python3 intelbridge
 
 # Patch Notes
 
-Due to popular demand, we've removed the URL Lookup feature. Previously, all URLs pulled form CrowdStrike Intel would be corss referenced with Zscaler's known URLs. If the URL was already cateegorized, it would be rejected by the script. This is no longer the case. All URLs will be pushed regardless of status with Zscaler. Our next patch will involve cleaning up the codebase and removing leftover references to deprecated processes and operations.
+We've narrowed the URL Lookup filter. Previously, any URL that Zscaler had already classified (regardless of category) was rejected. Now, the integration cross-references each candidate URL against Zscaler's `/urlLookup` API and skips only those where `urlClassificationsWithSecurityAlert` is non-empty — meaning Zscaler's own security engine already flags them, so pushing them into a custom category would be redundant. All other URLs — including those in benign categories — are pushed to your custom category.
 
-By removing the URL Lookup procedure, stability, reliability, and ease of use has been significantly improved.
-
-We've added a new logging destination. Now, indicators that were rejected by the regex filter will be logged in ./logs/rejected_log/. Also, the total rejected indicators count will be logged and displayed after a successfull run along side the number of successfully pushed indicators.
+We've added a new logging destination. Now, indicators that were rejected by the regex filter will be logged in ./logs/rejected_log/. Also, the total rejected indicators count will be logged and displayed after a successful run along side the number of successfully pushed indicators.
 
 example: 
 

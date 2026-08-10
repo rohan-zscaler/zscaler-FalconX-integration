@@ -92,12 +92,13 @@ def write_data(entry, deleted):
     return    
 
 def write_rejected(message, entry):
-    """writes rejected URLs to a log file
-    """    
+    """Appends rejected URLs to the day's log file.
+    Called multiple times per run (regex filter + per-chunk Zscaler rejects);
+    'a' mode preserves each batch instead of clobbering the previous one.
+    """
     rejected_indicators_data = f"logs/rejected_log/data_rejected"
     data_file = rejected_indicators_data
     data_file = data_file + "_" + time.strftime("%Y-%m-%d", time.gmtime()) +".log"
-    f = open(data_file, 'w')
-    f.write(f"{time.strftime('%Y-%m-%d', time.gmtime())}: {message}: {entry}")
-    f.close()
-    return    
+    with open(data_file, 'a') as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())}: {message}: {entry}\n")
+    return

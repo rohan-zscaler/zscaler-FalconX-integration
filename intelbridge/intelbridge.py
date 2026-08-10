@@ -119,7 +119,7 @@ class IntelBridge():
             sys.exit()
 
         logging.info(f"Looping enabled. Sleeping for 12 hours...Next update:{next_hour()}.\n")
-        time.sleep(1000)#*60*12)
+        time.sleep(60 * 60 * 12)
         return deleted, loop + 1
 
 

@@ -26,6 +26,10 @@ data_log = int(log_config['log_indicators'])
 # POST is rate-limited to 2/sec and 1000/hr, so a multi-hour run can comfortably
 # re-auth dozens of times.
 ZS_SESSION_TTL = 240
+# Bound reauth attempts per chunk. If Zscaler keeps returning 401 after this many
+# fresh JSESSIONIDs, the session is broken in a way retrying won't fix (revoked
+# role, IP allowlist change mid-run, etc.) — surface it instead of looping.
+MAX_AUTH_RETRIES = 3
 
 def _refresh_if_stale(token, headers, last_auth):
     """Proactively re-auths when the JSESSIONID is approaching expiry.
@@ -113,20 +117,21 @@ def split_indicators(indicators):
     return chunks
 
 def model_chunk(chunk):
-    """Transforms Indicator chunks into a Zscaler API ingestable model
+    """Transforms Indicator chunks into a Zscaler API ingestable model.
+    URLs that Zscaler has flagged with a non-empty urlClassificationsWithSecurityAlert
+    are skipped — Zscaler's own engine already handles those, so pushing them into a
+    custom category is redundant. Everything else is passed through.
     chunk - list of unformatted indicators
-    returns: list of formatted indicators
+    returns: (modeled chunk, count of skipped URLs)
     """
     modeled_urls = []
-    categorized = []
     alert = []
     if type(chunk) is not list:
-            return {'urls': [], 'dbCategorizedUrls': []}
+            return {'urls': []}, 0
     for url in chunk:
         try:
             if url['urlClassificationsWithSecurityAlert']:
                 alert.append(url['url'])
-                pass
             elif 'urlClassifications' not in url:
                 modeled_urls.append(url['url'])
             elif 'MISCELLANEOUS_OR_UNKNOWN' in url['urlClassifications']:
@@ -137,15 +142,11 @@ def model_chunk(chunk):
             e = sys.exc_info()[0]
             logging.info(str(e))
             pass
-        
+
     logging.info(f"urlClassificationsWithSecurityAlert qty:{len(alert)} ")
-    logging.info(f"misc qty:{len(categorized)} ")
-    modeled_chunk = {'urls': modeled_urls,
-                     }
+    modeled_chunk = {'urls': modeled_urls}
     write_rejected("urlClassificationsWithSecurityAlert known by zscaler", alert)
-    write_rejected("rejected by zscaler, misc reason", categorized)
-    amount_rejected = len(alert) + len(categorized)
-    return modeled_chunk, amount_rejected
+    return modeled_chunk, len(alert)
 
 def look_up_indicators(indicators, token):
     """Queries the Zscaler API with indicators to categorize them
@@ -166,11 +167,12 @@ def look_up_indicators(indicators, token):
     progress = [0, 0, len(chunks), "Looking up URLs in indicator chunk"]
     for chunk in chunks:
         success  = False
+        auth_retries = 0
         while not success:
             token, last_auth = _refresh_if_stale(token, headers, last_auth)
             response = requests.post(url=url, headers=headers, data=json.dumps(chunk))
             if response.status_code == 429:
-                r = int(response.headers._store['retry-after'][1])
+                r = int(response.headers.get('Retry-After', 60))
                 logging.info(f"[Zscaler API] Rate limit reached: Sleeping for {r} seconds.")
                 time.sleep(r+5)
                 continue
@@ -179,7 +181,13 @@ def look_up_indicators(indicators, token):
                 time.sleep(10)
                 continue
             if response.status_code == 401:
-                logging.info(f"[Zscaler API] 401 Token Expired: Renewing auth and retrying.")
+                auth_retries += 1
+                if auth_retries > MAX_AUTH_RETRIES:
+                    raise RuntimeError(
+                        f"[Zscaler API] 401 after {MAX_AUTH_RETRIES} reauth attempts on /urlLookup; "
+                        f"aborting. Last response body: {response.text[:500]}"
+                    )
+                logging.info(f"[Zscaler API] 401 Token Expired: Renewing auth and retrying (attempt {auth_retries}/{MAX_AUTH_RETRIES}).")
                 token = zs_auth()
                 headers["cookie"] = "JSESSIONID=" + str(token)
                 last_auth = time.time()
@@ -255,6 +263,7 @@ def put_chunks(indicators, url, headers, progress, token):
     partitioned_indicators = listSplit(indicators, partitions)
     for chunk in partitioned_indicators:
         success  = False
+        auth_retries = 0
         # chunk = {'urls': chunk}
         # if not chunk['urls'] and not chunk['dbCategorizedUrls']:
         #         progress[0] = progress[0] + 1
@@ -270,16 +279,22 @@ def put_chunks(indicators, url, headers, progress, token):
             }
             response = requests.put(url=url,headers=headers, data=json.dumps(payload))
             if response.status_code == 429:
-                r = int(response.headers._store['retry-after'][1])
+                r = int(response.headers.get('Retry-After', 60))
                 logging.info(f"[Zscaler API] Rate limit reached: Sleeping for {r} seconds.")
                 time.sleep(r+5)
-                continue 
+                continue
             if response.status_code == 409:
                 logging.info(f"[Zscaler API] 409 Unknown Error: Sleeping for 10 and retrying 10 seconds.")
                 time.sleep(10)
                 continue
             if response.status_code == 401:
-                logging.info(f"[Zscaler API] 401 Token Expired: Renewing auth and retrying.")
+                auth_retries += 1
+                if auth_retries > MAX_AUTH_RETRIES:
+                    raise RuntimeError(
+                        f"[Zscaler API] 401 after {MAX_AUTH_RETRIES} reauth attempts on /urlCategories PUT; "
+                        f"aborting. Last response body: {response.text[:500]}"
+                    )
+                logging.info(f"[Zscaler API] 401 Token Expired: Renewing auth and retrying (attempt {auth_retries}/{MAX_AUTH_RETRIES}).")
                 token = zs_auth()
                 headers["cookie"] = "JSESSIONID=" + str(token)
                 last_auth = time.time()
