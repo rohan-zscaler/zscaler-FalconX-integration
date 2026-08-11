@@ -246,6 +246,23 @@ def look_up_indicators(indicators, token):
                 continue
             success = True
             classified_chunk = response.json()
+            # Diagnostic for the prepared-to-attempted gap seen across three
+            # tenant runs (~30-40 URLs consistently vanishing). If Zscaler's
+            # /urlLookup returns fewer items than we sent (dedup on identical
+            # URLs after our normalization), sent > received explains the loss.
+            # If sent == received but attempted still short, look for another
+            # silent-drop path.
+            sent = len(chunk) if isinstance(chunk, list) else 0
+            received = len(classified_chunk) if isinstance(classified_chunk, list) else 0
+            if sent != received:
+                logging.info(
+                    f"[Zscaler API] /urlLookup chunk delta: sent={sent} "
+                    f"received={received} delta={sent - received}"
+                )
+            else:
+                logging.info(
+                    f"[Zscaler API] /urlLookup chunk balanced: sent={sent} received={received}"
+                )
             modeled_chunk, rejected = model_chunk(classified_chunk)
             amount_rejected = amount_rejected + rejected
             ingestable['urls'] += modeled_chunk['urls']
