@@ -31,6 +31,20 @@ ZS_SESSION_TTL = 240
 # role, IP allowlist change mid-run, etc.) — surface it instead of looping.
 MAX_AUTH_RETRIES = 3
 
+# Zscaler PUT /urlCategories chunk sizing. A single validator-rejected URL in a
+# chunk 400s the whole PUT ("URLs must not contain HTML content"), so the chunk
+# size sets the blast radius: one bad URL kills at most (ZS_PUT_CHUNK_SIZE - 1)
+# good ones. 100 is the first-run measurement value: the observed push rate is
+# a direct read of Zscaler-incompatible URL density in the Falcon stream. At
+# ~0.13% density we expect ~88% preserved; noticeably lower push rate means
+# density is higher and we need a follow-up (isolation, pre-filter, or a
+# Zscaler-support conversation about the patterns being rejected).
+ZS_PUT_CHUNK_SIZE = 100
+# Inter-PUT sleep. Assumed /urlCategories rate limit is 400/hr (unverified);
+# 15s → 240/hr sustained = 60% of cap, no bursts. Bump to 18s or 24s if we hit
+# 429s in production.
+ZS_PUT_SLEEP_SEC = 15
+
 def _refresh_if_stale(token, headers, last_auth):
     """Proactively re-auths when the JSESSIONID is approaching expiry.
     token - current Zscaler JSESSIONID
@@ -261,7 +275,7 @@ def put_chunks(indicators, url, headers, progress, token):
     results = []
     pushed = 0
     indicators = indicators['urls']
-    partitions = math.ceil(len(indicators)/5000)
+    partitions = math.ceil(len(indicators)/ZS_PUT_CHUNK_SIZE)
     partitioned_indicators = listSplit(indicators, partitions)
     for chunk in partitioned_indicators:
         success  = False
@@ -302,16 +316,21 @@ def put_chunks(indicators, url, headers, progress, token):
                 last_auth = time.time()
                 continue
             if response.status_code == 400:
-                # A single malformed URL in the chunk 400s the whole PUT (e.g.
-                # "URLs must not contain HTML content"). Skip the chunk with the
-                # response and offending URLs logged so the customer can
-                # investigate, instead of raising out of put_chunks and killing
-                # the rest of the run.
+                # A single validator-rejected URL 400s the whole chunk (e.g.
+                # "URLs must not contain HTML content"). Drop-on-400 policy:
+                # log the entire chunk with its URL list so the customer can
+                # pattern-match offenders, then continue with the next chunk.
+                # Chunk size (see ZS_PUT_CHUNK_SIZE) bounds the collateral to
+                # at most (chunk_size - 1) good URLs per bad URL.
                 logging.error(
-                    f"[Zscaler API] 400 Bad Request on chunk of {len(chunk)} URLs; "
-                    f"skipping this chunk. Response: {response.text[:500]}"
+                    f"[Zscaler API] 400 Bad Request — DROPPING chunk of "
+                    f"{len(chunk)} URLs (drop-on-400 policy). "
+                    f"Response: {response.text[:500]}"
                 )
-                write_rejected(f"Zscaler PUT 400: {response.text[:200]}", chunk)
+                write_rejected(
+                    f"Zscaler PUT 400 dropped-chunk: {response.text[:200]}",
+                    chunk,
+                )
                 progress = increment(progress, len(chunk))
                 break
             try:
@@ -329,7 +348,7 @@ def put_chunks(indicators, url, headers, progress, token):
             result = response.json()
             results.append(result)
             pushed += len(chunk)
-            time.sleep(1)
+            time.sleep(ZS_PUT_SLEEP_SEC)
     return results, token, pushed
 
 def save_changes(token):
