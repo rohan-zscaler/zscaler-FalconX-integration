@@ -68,7 +68,8 @@ class IntelBridge():
         content - Current list of URLs to be removed
         ingestable - Indicator list formatted for Zscaler API ingestion
         deleted - Boolean for pulling new or deleted indicators
-        returns: N/A
+        returns: count of URLs Zscaler acknowledged on the ADD_TO_LIST push
+                 (excludes chunks skipped by the 400 handler)
         """
         #remove last batch
         if content['urls'] and len(content['urls']) > 0:
@@ -76,13 +77,13 @@ class IntelBridge():
                         [!!!] You are still protected during this phase;
                         indicator refresh won't take effect until new indicators are pushed
                         and changes are activated!""")
-            _, token = push_indicators(token, category, content, True)
+            _, token, _ = push_indicators(token, category, content, True)
         # push new content
         logging.info(f"[Zscaler API] Pushing new indicators")
-        _, token = push_indicators(token, category, ingestable, False)
+        _, token, added_pushed = push_indicators(token, category, ingestable, False)
         # activate
         save_changes(token)
-        return
+        return added_pushed
 
     def etl_loop(self, falcon, zs_token, deleted, loop):
         """Main runtime loop - pulls, prepares, and pushes new indicators
@@ -104,13 +105,17 @@ class IntelBridge():
         indicators = self.pull(falcon, deleted)
         ingestable, amount_rejected, zs_token = self.prepare(zs_token, indicators)
         # write_data(ingestable, deleted)
-        self.update(zs_token, content, category_name, ingestable, deleted)
+        added_pushed = self.update(zs_token, content, category_name, ingestable, deleted)
         end = int(time.time())
         loop_delta = convert(end - start)
         total_delta = convert(end - self.start_time)
+        # "attempted" = URLs sent to Zscaler after regex + security-alert filtering.
+        # "pushed" = URLs Zscaler actually acknowledged with a 2xx; excludes chunks
+        # skipped by the 400 handler. Both matter for support triage.
         logging.info(f"Finished loop {loop}! Time elapsed: {loop_delta};\n"
                      f"Total run time: {total_delta};\n"
-                     f"Indicators {'pushed' if not deleted else 'removed'}: {len(ingestable['urls'])};\n"
+                     f"Indicators attempted: {len(ingestable['urls'])};\n"
+                     f"Indicators {'pushed' if not deleted else 'removed'}: {added_pushed};\n"
                      f"Indicators rejected: {amount_rejected};\n")
 
 
@@ -119,7 +124,7 @@ class IntelBridge():
             sys.exit()
 
         logging.info(f"Looping enabled. Sleeping for 12 hours...Next update:{next_hour()}.\n")
-        time.sleep(1000)#*60*12)
+        time.sleep(60 * 60 * 12)
         return deleted, loop + 1
 
 
