@@ -229,7 +229,7 @@ def push_indicators(token, category, indicators, deleted):
     category - Entity ID of Zscaler URL Category
     indicators - list of indicators to be pushed
     deleted - boolean for new or deleted indicators
-    returns: results of push
+    returns: (results, current token, count of URLs actually acknowledged by Zscaler)
     """
     action = "ADD_TO_LIST" if not deleted else "REMOVE_FROM_LIST"
     url = f"{zs_hostname}/api/v1/urlCategories/{category}?action={action}"
@@ -241,11 +241,11 @@ def push_indicators(token, category, indicators, deleted):
     print(f"{'='*22 if deleted else '='*22}"
           f"{'Removing Old' if deleted else 'Posting New'}* URL's"
           f"{'='*21 if deleted else '='*22}")
-    results, token = put_chunks(indicators, url, headers, progress, token)
+    results, token, pushed = put_chunks(indicators, url, headers, progress, token)
     print(f"{'='*29}DONE{'='*29}")
     if data_log == 1:
         write_data(indicators, deleted)
-    return results, token
+    return results, token, pushed
 
 def put_chunks(indicators, url, headers, progress, token):
     """Helper function for push_indicators that makes requests and tracks progress
@@ -254,10 +254,12 @@ def put_chunks(indicators, url, headers, progress, token):
     headers - headers for HTTP request
     progress - progress object
     token - Zscaler API Auth token (refreshed in-place on TTL or 401)
-    returns: (results of push, current token)
+    returns: (results of push, current token, count of URLs Zscaler acknowledged
+              with a 2xx — excludes chunks skipped by the 400 handler)
     """
     last_auth = time.time()
     results = []
+    pushed = 0
     indicators = indicators['urls']
     partitions = math.ceil(len(indicators)/5000)
     partitioned_indicators = listSplit(indicators, partitions)
@@ -326,8 +328,9 @@ def put_chunks(indicators, url, headers, progress, token):
             progress = increment(progress, len(chunk))
             result = response.json()
             results.append(result)
+            pushed += len(chunk)
             time.sleep(1)
-    return results, token
+    return results, token, pushed
 
 def save_changes(token):
     """Posts to Zscaler API to activate changes made in current etl_loop
