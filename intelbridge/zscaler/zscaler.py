@@ -5,7 +5,6 @@ Methods for working with relevant Zscaler API endpoints
 import logging
 import configparser
 import requests
-import sys
 import time
 import json
 import math
@@ -135,29 +134,47 @@ def model_chunk(chunk):
     URLs that Zscaler has flagged with a non-empty urlClassificationsWithSecurityAlert
     are skipped — Zscaler's own engine already handles those, so pushing them into a
     custom category is redundant. Everything else is passed through.
+
+    Uses .get() with an empty-default so a /urlLookup response item that omits
+    the 'urlClassificationsWithSecurityAlert' key is treated as "no security
+    alert" (safe to push) rather than dropped. Previously the bare-except
+    caught the KeyError and silently discarded the URL — observed twice on
+    real tenant runs (24 and 33 URLs respectively vanishing between prepared
+    and attempted counts).
+
+    A response item that lacks a 'url' field is logged loudly and skipped —
+    we can't push what we don't have, but the customer sees it happened
+    instead of silent loss.
+
     chunk - list of unformatted indicators
     returns: (modeled chunk, count of skipped URLs)
     """
     modeled_urls = []
     alert = []
+    unparseable = []
     if type(chunk) is not list:
             return {'urls': []}, 0
     for url in chunk:
-        try:
-            if url['urlClassificationsWithSecurityAlert']:
-                alert.append(url['url'])
-            elif 'urlClassifications' not in url:
-                modeled_urls.append(url['url'])
-            elif 'MISCELLANEOUS_OR_UNKNOWN' in url['urlClassifications']:
-                modeled_urls.append(url['url'])
-            else:
-                modeled_urls.append(url['url'])
-        except:
-            e = sys.exc_info()[0]
-            logging.info(str(e))
-            pass
+        url_str = url.get('url')
+        if not url_str:
+            unparseable.append(str(url)[:200])
+            continue
+        if url.get('urlClassificationsWithSecurityAlert'):
+            alert.append(url_str)
+        elif 'urlClassifications' not in url:
+            modeled_urls.append(url_str)
+        elif 'MISCELLANEOUS_OR_UNKNOWN' in url['urlClassifications']:
+            modeled_urls.append(url_str)
+        else:
+            modeled_urls.append(url_str)
 
     logging.info(f"urlClassificationsWithSecurityAlert qty:{len(alert)} ")
+    if unparseable:
+        logging.warning(
+            f"[Zscaler API] /urlLookup returned {len(unparseable)} response "
+            f"item(s) missing a 'url' field; logged and skipped."
+        )
+        write_rejected("urlLookup response missing 'url' field", unparseable)
     modeled_chunk = {'urls': modeled_urls}
     write_rejected("urlClassificationsWithSecurityAlert known by zscaler", alert)
     return modeled_chunk, len(alert)
